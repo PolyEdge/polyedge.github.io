@@ -500,7 +500,7 @@
 				try {
 					ct.init_proto_data(cb_success, cb_error);
 				} catch (error) {
-					handler(cb_error);
+					cb_error(cb_error);
 				}
 			}
 			
