@@ -2,7 +2,7 @@
 <html>
     <head>
         <title>CT</title>
-        <link rel="stylesheet" href="ct.css"/>
+        <link rel="stylesheet" href="ct1.css"/>
         <meta name="viewport" content="width=device-width, initial-scale=1">
 		<script src="https://cdn.jsdelivr.net/npm/protobufjs@7.2.3/dist/protobuf.min.js"></script>
 		<script>
@@ -355,7 +355,7 @@
 			}
 			
 			ct.init_proto_data = function(callback, error_handler) {
-				protobuf.load(ct.data_url.proto_file(), function(error, root) {
+				protobuf.load(new URL(ct.data_url.proto_file()), function(error, root) {
 					if (error == null) {
 						callback(root);
 					} else {
