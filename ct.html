@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>CT</title>
+        <link rel="stylesheet" href="ct.css"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+		<script src="https://cdn.jsdelivr.net/npm/protobufjs@7.2.3/dist/protobuf.min.js"></script>
+		<script>
+			var ct = {
+				cg_update_interval: 30,
+				cg_departure_columns: 3,
+				cg_cell_ratios: [0.45, 0.1],
+				
+				cmp_stations: null,
+				cmp_routes: null,
+				cmp_mappings: null,
+				proto_root: null,
+				proto_message: null,
+				proto_active_timer: null,
+				ui_user_location: null,
+				ui_current_route: null,
+				tbl_style_arr: []
+			};
+			
+			ct.data_url = {
+				proto_file: () => "https://raw.githubusercontent.com/google/transit/master/gtfs-realtime/proto/gtfs-realtime.proto",
+				feed_id: () => "gs4m-mdc2",
+				feed_asset: () => "https://data.calgary.ca/api/views/" + ct.data_url.feed_id() + "/",
+				feed_download: (blob_id) => "https://data.calgary.ca/api/views/" + ct.data_url.feed_id() + "/files/" + blob_id
+			};
+			
+			ct.data_messages = {
+				proto_error: () => "\u274C Failed to load protocol data :(",
+				fetch_error: (time) => "\u274C Failed to update times | Retrying in " + time + " seconds"
+			}
+			
+			ct.data_styles = {
+				overlay: "linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.06))",
+				divider: [255, 255, 255, 255],
+				end: [127, 127, 127, 255]
+			};
+			
+			ct.data_stations = {
+				"header": [{
+					"id": "201",
+					"name": "tuscany",
+					"colour": "#FF0000"
+				}, {
+					"id": "201",
+					"name": "somerset",
+					"colour": "#FF0000"
+				}, {
+					"id": "202",
+					"name": "69 st",
+					"colour": "#0000FF"
+				}, {
+					"id": "202",
+					"name": "saddletowne",
+					"colour": "#0000FF"
+				}],
+				"stations": [{
+					"pos": [51.037556, -114.18848],
+					"name": "69 Street Station",
+					"stops": [null, null, ["3626", 21], ["3627", 1]]
+				}, {
+					"pos": [51.038128, -114.169534],
+					"name": "Sirocco Station",
+					"stops": [null, null, ["3628", 20], ["3629", 2]]
+				}, {
+					"pos": [51.037905, -114.153475],
+					"name": "45 Street Station",
+					"stops": [null, null, ["3630", 19], ["3631", 3]]
+				}, {
+					"pos": [51.04049, -114.136472],
+					"name": "Westbrook Station",
+					"stops": [null, null, ["3632", 18], ["3633", 4]]
+				}, {
+					"pos": [51.041563, -114.124218],
+					"name": "Shaganappi Point Station",
+					"stops": [null, null, ["3634", 17], ["3635", 5]]
+				}, {
+					"pos": [51.044714, -114.099508],
+					"name": "Sunalta Station",
+					"stops": [null, null, ["3636", 16], ["3637", 6]]
+				}, {
+					"pos": [51.047176, -114.087691],
+					"name": "Downtown-West Kerby Station",
+					"stops": [null, null, ["3638", 15], ["3639", 7]]
+				}, {
+					"pos": [51.134474, -114.235596],
+					"name": "Tuscany Station",
+					"stops": [["3640", 24], ["3641", 1], null, null]
+				}, {
+					"pos": [51.122631, -114.206982],
+					"name": "Crowfoot Station",
+					"stops": [["3816", 23], ["3817", 2], null, null]
+				}, {
+					"pos": [51.103465, -114.161014],
+					"name": "Dalhousie Station",
+					"stops": [["4155", 22], ["3960", 3], null, null]
+				}, {
+					"pos": [51.086769, -114.13132],
+					"name": "Brentwood Station",
+					"stops": [["4934", 21], ["6815", 4], null, null]
+				}, {
+					"pos": [51.117593, -113.967701],
+					"name": "Martindale Station",
+					"stops": [null, null, ["6747", 2], ["9396", 21]]
+				}, {
+					"pos": [50.954256, -114.074515],
+					"name": "Anderson Station",
+					"stops": [["6801", 5], ["9263", 21], null, null]
+				}, {
+					"pos": [50.964445, -114.076738],
+					"name": "Southland Station",
+					"stops": [["6802", 6], ["8561", 20], null, null]
+				}, {
+					"pos": [50.979329, -114.073715],
+					"name": "Heritage Station",
+					"stops": [["6803", 7], ["8560", 19], null, null]
+				}, {
+					"pos": [50.997459, -114.065703],
+					"name": "Chinook Station",
+					"stops": [["6804", 8], ["8559", 18], null, null]
+				}, {
+					"pos": [51.01783, -114.061323],
+					"name": "39 Avenue Station",
+					"stops": [["6805", 9], ["8558", 17], null, null]
+				}, {
+					"pos": [51.031924, -114.05894],
+					"name": "Erlton / Stampede CTrain Staion",
+					"stops": [["6806", 10], ["8557", 16], null, null]
+				}, {
+					"pos": [51.038398, -114.058337],
+					"name": "Victoria Park / Stampede Station",
+					"stops": [["6807", 11], ["8556", 15], null, null]
+				}, {
+					"pos": [51.087004, -113.981707],
+					"name": "Whitehorn Station",
+					"stops": [null, null, ["6808", 4], ["9385", 19]]
+				}, {
+					"pos": [51.07518, -113.981713],
+					"name": "Rundle Station",
+					"stops": [null, null, ["8572", 5], ["6809", 18]]
+				}, {
+					"pos": [51.058993, -113.981703],
+					"name": "Marlborough Station",
+					"stops": [null, null, ["8571", 6], ["6810", 17]]
+				}, {
+					"pos": [51.047082, -113.9947],
+					"name": "Franklin Station",
+					"stops": [null, null, ["8570", 7], ["6811", 16]]
+				}, {
+					"pos": [51.045486, -114.006627],
+					"name": "Barlow - Max Bell Station",
+					"stops": [null, null, ["8569", 8], ["6812", 15]]
+				}, {
+					"pos": [51.047336, -114.025514],
+					"name": "Zoo Station",
+					"stops": [null, null, ["8568", 9], ["6813", 14]]
+				}, {
+					"pos": [51.048952, -114.039875],
+					"name": "Bridgeland - Memorial Station",
+					"stops": [null, null, ["8567", 10], ["6814", 13]]
+				}, {
+					"pos": [51.080214, -114.123106],
+					"name": "University Station",
+					"stops": [["6816", 20], ["8566", 5], null, null]
+				}, {
+					"pos": [51.071131, -114.115688],
+					"name": "Banff Trail Station",
+					"stops": [["6817", 19], ["8565", 6], null, null]
+				}, {
+					"pos": [51.065043, -114.103384],
+					"name": "Lions Park Station",
+					"stops": [["6818", 18], ["8564", 7], null, null]
+				}, {
+					"pos": [51.063021, -114.091156],
+					"name": "SAIT / AUArts / Jubilee Station",
+					"stops": [["6819", 17], ["8563", 8], null, null]
+				}, {
+					"pos": [51.056368, -114.084422],
+					"name": "Sunnyside Station",
+					"stops": [["6820", 16], ["8562", 9], null, null]
+				}, {
+					"pos": [51.046305, -114.056723],
+					"name": "City Hall Station",
+					"stops": [["6822", 12], ["6831", 14], ["6822", 11], ["6831", 12]]
+				}, {
+					"pos": [51.046574, -114.064383],
+					"name": "1 Street SW Station",
+					"stops": [["6823", 13], null, ["6823", 12], null]
+				}, {
+					"pos": [51.046803, -114.072416],
+					"name": "4 Street SW Station",
+					"stops": [["6824", 14], null, ["6824", 13], null]
+				}, {
+					"pos": [51.046969, -114.077971],
+					"name": "7 Street SW Station",
+					"stops": [["6825", 15], null, ["6825", 14], null]
+				}, {
+					"pos": [51.046916, -114.079953],
+					"name": "8 Street SW Station",
+					"stops": [null, ["6827", 10], null, ["6827", 8]]
+				}, {
+					"pos": [51.046765, -114.074858],
+					"name": "6 Street SW Station",
+					"stops": [null, ["6828", 11], null, ["6828", 9]]
+				}, {
+					"pos": [51.046606, -114.068904],
+					"name": "3 Street SW Station",
+					"stops": [null, ["6829", 12], null, ["6829", 10]]
+				}, {
+					"pos": [51.046378, -114.061241],
+					"name": "Centre Street Station",
+					"stops": [null, ["6830", 13], null, ["6830", 11]]
+				}, {
+					"pos": [50.92371, -114.073273],
+					"name": "Fish Creek - Lacombe Station",
+					"stops": [["9261", 3], ["9387", 23], null, null]
+				}, {
+					"pos": [50.936405, -114.0698],
+					"name": "Canyon Meadows Station",
+					"stops": [["9262", 4], ["9264", 22], null, null]
+				}, {
+					"pos": [50.898745, -114.068816],
+					"name": "Somerset - Bridlewood Station",
+					"stops": [["9390", 1], ["9386", 25], null, null]
+				}, {
+					"pos": [50.910753, -114.07058],
+					"name": "Shawnessy Station",
+					"stops": [["9391", 2], ["9392", 24], null, null]
+				}, {
+					"pos": [51.125719, -113.948318],
+					"name": "Saddletowne Station",
+					"stops": [null, null, ["9781", 1], ["9398", 22]]
+				}, {
+					"pos": [51.10957, -113.975265],
+					"name": "McKnight - Westwinds Station",
+					"stops": [null, null, ["9897", 3], ["9896", 20]]
+				}]
+			};
+			
+			ct.clr_rgba_gen = function(colour) {
+				var round = (value) => Math.round(value * 100) / 100;
+				return "rgba(" + round(colour[0]) + ", " + round(colour[1]) + ", " + round(colour[2]) + ", " + round(colour[3]) / 255 + ")"
+			};
+			
+			ct.clr_gradient_gen = function(start, end) {
+				if (typeof(start) == "object") start = ct.clr_rgba_gen(start);
+				if (typeof(end) == "object") end = ct.clr_rgba_gen(end);
+				return "linear-gradient(90deg, " + start + ", " + end + ")";
+			}
+
+			ct.clr_gradient_divide = function(start, end, points) {
+				var output = [];
+				for (var i = 0; i < points; i++) {
+                    var colour = [];
+                    output.push(colour);
+                    for (var j = 0; j < start.length; j++) {
+                        colour.push(start[j] + (end[j] - start[j]) * (i / (points - 1)));
+                    }
+                }
+                return output;
+			};
+			
+			ct.tbl_gen_style = function(count) {
+				var name = "tbl-departs-" + count;
+				if (ct.tbl_style_arr.indexOf(count) != -1) return name;
+				ct.tbl_style_arr.push(count);
+				var points = ct.clr_gradient_divide(ct.data_styles.divider, ct.data_styles.end, count + 1);
+				var style = document.createElement("style");
+				var width = (1 - ct.cg_cell_ratios[0] - ct.cg_cell_ratios[1]) / count;
+				var selector = "tr." + name + " > td:nth-child(";
+				var css = selector + "1) {\n	width: " + (ct.cg_cell_ratios[0] * 100) + "%;\n}\n\n";
+				css += selector + "2) {\n	width: " + (ct.cg_cell_ratios[1] * 100) + "%;\n}\n\n";
+				css += selector + "n+3) {\n	width: " + (width * 100) + "%;\n}\n\n";
+				for (var i = 0; i < count + 1; i++) {
+					var colour1 = i == 0 ? ct.data_styles.divider : points[i - 1];
+					var colour2 = i == 0 ? ct.data_styles.divider : points[i];
+					var colour = ct.data_styles.overlay + ", " + ct.clr_gradient_gen(colour1, colour2);
+					css += selector + (i + 2) + ") {\n	background-image: " + colour + ";\n}\n\n";
+				}
+				style.appendChild(document.createTextNode(css));
+				document.head.appendChild(style);
+				return name;
+			}
+			
+			ct.tbl_gen_cell = function(row, text, bg) {
+				var cell = document.createElement("td");
+				if (text != null) cell.appendChild(document.createTextNode(text))
+				if (bg != null) cell.style.backgroundImage = ct.data_styles.overlay + ", " + ct.clr_gradient_gen(bg, ct.data_styles.divider);
+				row.appendChild(cell);
+				return cell;
+			};
+			
+			ct.tbl_gen_row = function(row, column_count, route_name, route_accent) {
+				row.classList.add(ct.tbl_gen_style(column_count))
+				ct.tbl_gen_cell(row, route_name, route_accent);
+				ct.tbl_gen_cell(row, "/", null);
+				var cells = [];
+				for (var i = 0; i < column_count; i++) {
+					cells.push(ct.tbl_gen_cell(row, null, null));
+				}
+				return cells;
+			};
+			
+			ct.init_parse_station = function(station_data, update_map, route_map, column_count) {
+				var resize_array = function(array, size) { while(array.length < size) array.push(null); }
+				var real_stops = station_data.stops.map((x, i) => [i, x]).filter((x) => x[1] != null).map((x) => [x[0], x[1][0], x[1][1]]);
+				var stop_ids = real_stops.map((x) => x[1]);
+				stop_ids = stop_ids.filter((x, i, s) => s.indexOf(x) == i);
+				
+				var station_id = document.createElement("b");
+				station_id.appendChild(document.createTextNode(stop_ids.join(" ")));
+				var header = document.createElement("div");
+				header.appendChild(station_id);
+				header.appendChild(document.createTextNode(station_data.name));
+				var table = document.createElement("table");
+				table.cellSpacing = "0";
+				var entry = document.createElement("div");
+				entry.classList.add("station-table");
+				entry.appendChild(header);
+				entry.appendChild(table);
+				
+				var rows = [];
+				var structure = {
+					name: station_data.name,
+					pos_latitude: station_data.pos[0],
+					pos_longitude: station_data.pos[1],
+					stops: station_data.stops,
+					query: stop_ids.join(" ") + " " + station_data.name,
+					entry: entry,
+					handles: rows
+				};
+				
+				for (var i = 0; i < real_stops.length; i++) {
+					var stop = real_stops[i];
+					var ordinal = stop[0];
+					var route = ct.data_stations.header[ordinal];
+					var row = table.insertRow();
+					var cells = ct.tbl_gen_row(row, column_count, route.name.toUpperCase(), route.colour);
+					var row = {times: [], cells: cells}
+					rows.push(row);
+					if (!(route.id in update_map)) update_map[route.id] = {};
+					update_map[route.id][stop[1]] = row;
+					resize_array(route_map, ordinal + 1);
+					if (route_map[ordinal] == null) route_map[ordinal] = [];
+					var route_stops = route_map[ordinal];
+					resize_array(route_stops, stop[2] + 1);
+					route_stops[stop[2]] = structure;
+				}
+
+				return structure;
+			}
+			
+			ct.init_proto_data = function(callback, error_handler) {
+				protobuf.load(ct.data_url.proto_file(), function(error, root) {
+					if (error == null) {
+						callback(root);
+					} else {
+						error_handler(error);
+					}
+				});
+			}
+			
+			ct.proto_fetch_times = function(error_handler, times_callback, finish_callback) {
+				fetch(ct.data_url.feed_asset())
+					.then(response => response.json())
+					.then(data => fetch(ct.data_url.feed_download(data["blobId"])))
+					.then(response => response.blob())
+					.then(blob => blob.arrayBuffer())
+					.then(stream => times_callback(ct.proto_message.decode(new Uint8Array(stream))))
+					.catch(error => error_handler(error))
+					.finally(param => finish_callback(param));
+			}
+			
+			ct.proto_schedule_fetch = function() {
+				clearTimeout(ct.proto_active_timer);
+				ct.proto_active_timer = null;
+				console.log("fetching " + Date.now());
+				var interval = ct.cg_update_interval;
+			
+				ct.proto_fetch_times(
+					function(error) {
+						console.error(error);
+						ct.ui_display_info(ct.data_messages.fetch_error(interval));
+					},
+					function(times) {
+						ct.proto_clear_times();
+						ct.proto_compile_times(times);
+						ct.ui_display_info(null);
+					},
+					function() {
+						ct.ui_display_times();
+						ct.proto_active_timer = setTimeout(() => ct.proto_schedule_fetch(), interval * 1000);
+					}
+				)
+			}
+			
+			ct.proto_clear_times = function() {
+				for (var route_id in ct.cmp_mappings) {
+					var route = ct.cmp_mappings[route_id];
+					for (var stop_id in route) {
+						route[stop_id].times.length = 0;
+					}
+				}
+			}
+			
+			ct.proto_compile_times = function(feed_message) {
+				dbg_feedmessage = feed_message;
+				ct.proto_clear_times();
+				for (var i = 0; i < feed_message.entity.length; i++) {
+					var item = feed_message.entity[i];
+					var route_id = item.tripUpdate.trip.routeId;
+					if (!ct.cmp_mappings.hasOwnProperty(route_id)) continue;
+					var route_mappings = ct.cmp_mappings[route_id];
+					var updates = item.tripUpdate.stopTimeUpdate;
+					for (var j = 0; j < updates.length; j++) {
+						var update = updates[j];
+						if (update.departure == null) continue;
+						var stop_id = update.stopId;
+						if (!route_mappings.hasOwnProperty(stop_id)) continue;
+						route_mappings[stop_id].times.push(update.departure.time);
+					}
+				}
+			}
+			
+			ct.ui_display_times = function() {
+				var now = Date.now() / 1000;
+				for (var index in ct.cmp_stations) {
+					var handles = ct.cmp_stations[index].handles;
+					for (var handle_index in handles) {
+						var handle = handles[handle_index];
+						var valid = handle.times.filter(item => item != null && now < item);
+						valid.sort();
+						for (var i = 0; i < handle.cells.length; i++) {
+							var time = valid[i];
+							var element = handle.cells[i];
+							while (element.firstChild) {
+								element.removeChild(element.lastChild);
+							}
+							var text = time == null ? "-   " : Math.floor((time - now) / 60) + "m";
+							element.appendChild(document.createTextNode(text));
+						}
+					}
+				}
+			}
+			
+			ct.ui_display_info = function(info) {
+				var element = document.querySelector("div.message-area");
+				while (element.firstChild) {
+					element.removeChild(element.lastChild);
+				}
+				if (info == null) {
+					element.classList.add("hidden");
+				} else {
+					element.appendChild(document.createTextNode(info));
+					element.classList.remove("hidden");
+				}
+			}
+			
+			ct.ui_cb_locate = function() {
+				console.log("locate");
+			}
+			
+			ct.ui_cb_search = function() {
+				console.log("search");
+			}
+			
+			ct.init_main = function() {
+				ct.cmp_stations = [];
+				ct.cmp_mappings = {};
+				ct.cmp_routes = [];
+				ct.proto_active_times = [];
+				
+				var test = document.querySelector("div.main-content");
+				for (var i = 0; i < ct.data_stations.stations.length; i++) {
+					var station = ct.init_parse_station(ct.data_stations.stations[i], ct.cmp_mappings, ct.cmp_routes, ct.cg_departure_columns);
+					ct.cmp_stations.push(station);
+					test.appendChild(station.entry);
+				}
+				
+				ct.ui_display_times();
+				
+				document.querySelector("button.station-search-locate").addEventListener("click", ct.ui_cb_locate);
+				document.querySelector("button.station-search-search").addEventListener("click", ct.ui_cb_search);
+				
+				var cb_success = function(root) {
+					ct.proto_root = root;
+					ct.proto_message = root.lookupType("FeedMessage");
+					ct.proto_schedule_fetch();
+				};
+			
+				var cb_error = function(error) {
+					console.error(error);
+					ct.ui_display_info(ct.data_messages.proto_error());
+				};
+				
+				try {
+					ct.init_proto_data(cb_success, cb_error);
+				} catch (error) {
+					handler(cb_error);
+				}
+			}
+			
+			window.addEventListener("DOMContentLoaded", (event) => {
+				ct.init_main();
+				
+			});
+		</script>
+    </head>
+    <body>
+        <div class="site-nav content-row">
+            <a class="nav-title" href>CTrain Departures</a>
+            <div class="station-search">
+                <input type="search" placeholder="Station name..." spellcheck=false></input>
+				<div class="station-search-buttons">
+					<button class="station-search-locate" title="Location"></button>
+					<button class="station-search-search" title="Search"></button>
+				</div>
+            </div>
+        </div>
+		<div class="main-content content-row content-body"></div>
+        <div class="message-area content-row content-body hidden"> a</div>
+    </body>
+</html>
