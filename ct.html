@@ -1,12 +1,14 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
     <head>
-        <title>CT</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>CT</title>
+		<meta name="viewport" content="width=device-width, initial-scale=1">
 		<script src="https://cdn.jsdelivr.net/npm/protobufjs@7.2.3/dist/protobuf.min.js"></script>
 		<script>
+
 			var ct = {
 				cg_update_interval: 30,
+				cg_overhead_time: 55,
 				cg_departure_columns: 3,
 				cg_cell_ratios: [0.45, 0.1],
 				
@@ -21,6 +23,12 @@
 				tbl_style_arr: []
 			};
 			
+			ct.ex_missing_data = class extends Error {
+				constructor(message, options) {
+					super(message, options);
+				}
+			}
+			
 			ct.data_url = {
 				proto_file: () => "https://raw.githubusercontent.com/google/transit/master/gtfs-realtime/proto/gtfs-realtime.proto",
 				feed_id: () => "gs4m-mdc2",
@@ -30,7 +38,8 @@
 			
 			ct.data_messages = {
 				proto_error: () => "\u274C Failed to load protocol data :(",
-				fetch_error: (time) => "\u274C Failed to update times | Retrying in " + time + " seconds"
+				fetch_error: (time) => "\u274C they forgor when the trains coming \uD83D\uDC80 - trying again soon \uD83D\uDE33",
+				data_missing: () => "\u274C they forgor when anythings coming \uD83D\uDC80"
 			}
 			
 			ct.data_styles = {
@@ -127,7 +136,7 @@
 					"stops": [["6805", 9], ["8558", 17], null, null]
 				}, {
 					"pos": [51.031924, -114.05894],
-					"name": "Erlton / Stampede CTrain Staion",
+					"name": "Erlton / Stampede Station",
 					"stops": [["6806", 10], ["8557", 16], null, null]
 				}, {
 					"pos": [51.038398, -114.058337],
@@ -296,7 +305,7 @@
 			ct.tbl_gen_row = function(row, column_count, route_name, route_accent) {
 				row.classList.add(ct.tbl_gen_style(column_count))
 				ct.tbl_gen_cell(row, route_name, route_accent);
-				ct.tbl_gen_cell(row, "/", null);
+				ct.tbl_gen_cell(row, "", null);
 				var cells = [];
 				for (var i = 0; i < column_count; i++) {
 					cells.push(ct.tbl_gen_cell(row, null, null));
@@ -339,7 +348,7 @@
 					var route = ct.data_stations.header[ordinal];
 					var row = table.insertRow();
 					var cells = ct.tbl_gen_row(row, column_count, route.name.toUpperCase(), route.colour);
-					var row = {times: [], cells: cells}
+					var row = {times: [], row: row, cells: cells}
 					rows.push(row);
 					if (!(route.id in update_map)) update_map[route.id] = {};
 					update_map[route.id][stop[1]] = row;
@@ -375,13 +384,15 @@
 			ct.proto_schedule_fetch = function() {
 				clearTimeout(ct.proto_active_timer);
 				ct.proto_active_timer = null;
-				console.log("fetching " + Date.now());
+				//console.log("fetching " + Date.now());
 				var interval = ct.cg_update_interval;
+				document.querySelector("div.main-content").classList.add("departure-loading")
 			
 				ct.proto_fetch_times(
 					function(error) {
 						console.error(error);
-						ct.ui_display_info(ct.data_messages.fetch_error(interval));
+						if (error instanceof ct.ex_missing_data) ct.ui_display_info(ct.data_messages.data_missing());
+						else ct.ui_display_info(ct.data_messages.fetch_error(interval));
 					},
 					function(times) {
 						ct.proto_clear_times();
@@ -389,6 +400,7 @@
 						ct.ui_display_info(null);
 					},
 					function() {
+						document.querySelector("div.main-content").classList.remove("departure-loading")
 						ct.ui_display_times();
 						ct.proto_active_timer = setTimeout(() => ct.proto_schedule_fetch(), interval * 1000);
 					}
@@ -406,8 +418,11 @@
 			
 			ct.proto_compile_times = function(feed_message) {
 				dbg_feedmessage = feed_message;
+				var length = feed_message.entity.length;
+				if (length == 0) throw new ct.ex_missing_data("No CTrain updates: no messages");
 				ct.proto_clear_times();
-				for (var i = 0; i < feed_message.entity.length; i++) {
+				var has = false;
+				for (var i = 0; i < length; i++) {
 					var item = feed_message.entity[i];
 					var route_id = item.tripUpdate.trip.routeId;
 					if (!ct.cmp_mappings.hasOwnProperty(route_id)) continue;
@@ -418,18 +433,22 @@
 						if (update.departure == null) continue;
 						var stop_id = update.stopId;
 						if (!route_mappings.hasOwnProperty(stop_id)) continue;
+						has = true;
 						route_mappings[stop_id].times.push(update.departure.time);
 					}
 				}
+				if (!has) throw new ct.ex_missing_data("No CTrain updates: " + length + " messages");
 			}
 			
 			ct.ui_display_times = function() {
-				var now = Date.now() / 1000;
+				var now = Date.now() / 1000 - ct.cg_overhead_time;
 				for (var index in ct.cmp_stations) {
 					var handles = ct.cmp_stations[index].handles;
 					for (var handle_index in handles) {
 						var handle = handles[handle_index];
 						var valid = handle.times.filter(item => item != null && now < item);
+						if (valid.length > 0) handle.row.classList.remove("departure-none");
+						else handle.row.classList.add("departure-none");
 						valid.sort();
 						for (var i = 0; i < handle.cells.length; i++) {
 							var time = valid[i];
@@ -514,6 +533,11 @@
 			  --departures-ratio: 30%;
 			}
 
+			html {
+				height: 100%;
+			}
+
+
 			body {
 				display: flex;
 				flex-direction: column;
@@ -523,7 +547,7 @@
 				background-image: linear-gradient(to bottom, #d7e3f4, #eaf8fb);
 				background-repeat: no-repeat;
 				background-attachment: fixed;
-				height: 100vh;
+				height: 100%;
 				position: relative;
 				overflow: hidden;
 			}
@@ -705,15 +729,20 @@
 
 			/**/
 
-			/*@keyframes test {
-				from {filter: contrast(0.25);}
-				to {filter: contrast(0.85);}
+			@keyframes loading-animation {
+				from {filter: brightness(0.75);}
+				to {filter: brightness(0.95);}
 			}
 
-			.station-table tr {
-				animation: test 2s ease-in-out infinite;
-				animation-direction: alternate;
-			}*/
+			.departure-loading .station-table table {
+				/*animation: loading-animation 0.75s ease-in-out infinite;
+				animation-direction: alternate;*/
+				filter: saturate(0.85) contrast(0.5)
+			}
+			
+			tr.departure-none {
+				filter: contrast(0.5);
+			}
 
 			.station-table td {
 				white-space: normal;
@@ -740,19 +769,19 @@
 				display: none;
 			}
 		</style>
-    </head>
-    <body>
-        <div class="site-nav content-row">
-            <a class="nav-title" href>CTrain Departures</a>
-            <div class="station-search">
-                <input type="search" placeholder="Station name..." spellcheck=false></input>
+	</head>
+	<body>
+		<div class="site-nav content-row">
+			<a class="nav-title" href>CTrain Departures</a>
+			<div class="station-search">
+				<input type="search" placeholder="Station name..." spellcheck=false></input>
 				<div class="station-search-buttons">
-					<button class="station-search-locate" title="Location"></button>
-					<button class="station-search-search" title="Search"></button>
+					<button class="station-search-locate" title="Location" type="button"></button>
+					<button class="station-search-search" title="Search" type="button"></button>
 				</div>
-            </div>
-        </div>
+			</div>
+		</div>
 		<div class="main-content content-row content-body"></div>
-        <div class="message-area content-row content-body hidden"> a</div>
-    </body>
+		<div class="message-area content-row content-body hidden"> a</div>
+	</body>
 </html>
