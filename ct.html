@@ -15,11 +15,15 @@
 				cmp_stations: null,
 				cmp_routes: null,
 				cmp_mappings: null,
+				cmp_names: null,
 				proto_root: null,
 				proto_message: null,
 				proto_active_timer: null,
 				ui_user_location: null,
 				ui_current_route: null,
+				ui_search_text: null,
+				ui_update_timer: null,
+				ui_station_array: null,
 				tbl_style_arr: []
 			};
 			
@@ -263,13 +267,13 @@
 			ct.clr_gradient_divide = function(start, end, points) {
 				var output = [];
 				for (var i = 0; i < points; i++) {
-                    var colour = [];
-                    output.push(colour);
-                    for (var j = 0; j < start.length; j++) {
-                        colour.push(start[j] + (end[j] - start[j]) * (i / (points - 1)));
-                    }
-                }
-                return output;
+					var colour = [];
+					output.push(colour);
+					for (var j = 0; j < start.length; j++) {
+						colour.push(start[j] + (end[j] - start[j]) * (i / (points - 1)));
+					}
+				}
+				return output;
 			};
 			
 			ct.tbl_gen_style = function(count) {
@@ -316,7 +320,9 @@
 			ct.init_parse_station = function(station_data, update_map, route_map, column_count) {
 				var resize_array = function(array, size) { while(array.length < size) array.push(null); }
 				var real_stops = station_data.stops.map((x, i) => [i, x]).filter((x) => x[1] != null).map((x) => [x[0], x[1][0], x[1][1]]);
+				var route_ids = real_stops.map((x) => ct.data_stations.header[x[0]].id);
 				var stop_ids = real_stops.map((x) => x[1]);
+				route_ids = route_ids.filter((x, i, s) => s.indexOf(x) == i);
 				stop_ids = stop_ids.filter((x, i, s) => s.indexOf(x) == i);
 				
 				var station_id = document.createElement("b");
@@ -337,7 +343,7 @@
 					pos_latitude: station_data.pos[0],
 					pos_longitude: station_data.pos[1],
 					stops: station_data.stops,
-					query: stop_ids.join(" ") + " " + station_data.name,
+					query: (route_ids.join(" ") + " " + stop_ids.join(" ") + " " + station_data.name).toLowerCase(),
 					entry: entry,
 					handles: rows
 				};
@@ -384,9 +390,9 @@
 			ct.proto_schedule_fetch = function() {
 				clearTimeout(ct.proto_active_timer);
 				ct.proto_active_timer = null;
-				//console.log("fetching " + Date.now());
 				var interval = ct.cg_update_interval;
-				document.querySelector("div.main-content").classList.add("departure-loading")
+				var main_content = document.querySelector("div.main-content");
+				main_content.classList.add("departure-loading")
 			
 				ct.proto_fetch_times(
 					function(error) {
@@ -400,7 +406,7 @@
 						ct.ui_display_info(null);
 					},
 					function() {
-						document.querySelector("div.main-content").classList.remove("departure-loading")
+						main_content.classList.remove("departure-loading")
 						ct.ui_display_times();
 						ct.proto_active_timer = setTimeout(() => ct.proto_schedule_fetch(), interval * 1000);
 					}
@@ -447,15 +453,13 @@
 					for (var handle_index in handles) {
 						var handle = handles[handle_index];
 						var valid = handle.times.filter(item => item != null && now < item);
-						if (valid.length > 0) handle.row.classList.remove("departure-none");
-						else handle.row.classList.add("departure-none");
+						if (valid.length > 0) handle.row.classList.remove("style-grayed");
+						else handle.row.classList.add("style-grayed");
 						valid.sort();
 						for (var i = 0; i < handle.cells.length; i++) {
 							var time = valid[i];
 							var element = handle.cells[i];
-							while (element.firstChild) {
-								element.removeChild(element.lastChild);
-							}
+							while (element.firstChild) element.removeChild(element.lastChild);
 							var text = time == null ? "-   " : Math.floor((time - now) / 60) + "m";
 							element.appendChild(document.createTextNode(text));
 						}
@@ -465,39 +469,125 @@
 			
 			ct.ui_display_info = function(info) {
 				var element = document.querySelector("div.message-area");
-				while (element.firstChild) {
-					element.removeChild(element.lastChild);
-				}
+				while (element.firstChild) element.removeChild(element.lastChild);
 				if (info == null) {
-					element.classList.add("hidden");
+					element.classList.add("style-hidden");
 				} else {
 					element.appendChild(document.createTextNode(info));
-					element.classList.remove("hidden");
+					element.classList.remove("style-hidden");
 				}
+			}
+			
+			ct.ui_schedule_update = function(time) {
+				if (ct.ui_update_timer != null) clearTimeout(ct.ui_update_timer);
+				ct.ui_update_timer = null;
+				if (time == null) ct.ui_update();
+				else ct.ui_update_timer = setTimeout(ct.ui_update, time)
+			}
+			
+			ct.ui_update = function() {
+				ct.ui_station_array = ct.ui_perform_search(ct.ui_search_text);
+				var element = document.querySelector("div.main-content");
+				while (element.firstChild) element.removeChild(element.lastChild);
+				for (var i = 0; i < ct.ui_station_array.length; i++) {
+					element.appendChild(ct.ui_station_array[i]);
+				}
+			}
+			
+			ct.ui_perform_search = function(query) {
+				var comparator = function(a, b) {
+					var loc = ct.ui_user_location.coords;
+					var dist1 = (loc.latitude - a.pos_latitude) ** 2 + (loc.longitude - a.pos_longitude) ** 2;
+					var dist2 = (loc.latitude - b.pos_latitude) ** 2 + (loc.longitude - b.pos_longitude) ** 2;
+					return dist1 == dist2 ? 0 : dist1 < dist2 ? -1 : 1;
+				}
+			
+				query = (query || "").toLowerCase().trim();
+				var route = ct.cmp_names[query];
+				var stations = null;
+				if (route != null) {
+					stations = ct.cmp_routes[route].filter(i => i != null);
+				} else {
+					query = query.split(" ").filter(i => i.trim().length > 0);
+					stations = ct.cmp_stations.filter(i => query.filter(j => i.query.indexOf(j) == -1).length == 0);
+				}
+				var filtered = [];
+				for (var i = 0; i < ct.cmp_stations.length; i++) {
+					var station = ct.cmp_stations[i];
+					if (stations.indexOf(station) != -1) {
+						station.entry.classList.remove("style-grayed");
+					} else {
+						station.entry.classList.add("style-grayed");
+						filtered.push(station);
+					}
+				}
+				if (ct.ui_user_location != null) {
+					stations.sort(comparator);
+					filtered.sort(comparator);
+				}
+				for (var i = 0; i < filtered.length; i++) {
+					stations.push(filtered[i]);
+				}
+				return stations.map(i => i.entry);
+			}
+			
+			ct.ui_location_enable = function(location) {
+				var button = document.querySelector("button.station-search-locate");
+				ct.ui_user_location = location;
+				if (location != null) {
+					button.classList.add("style-invert");
+					ct.ui_schedule_update(null);
+				} else {
+					button.classList.remove("style-invert");
+				}
+			}
+			
+			ct.ui_cb_input = function(event) {
+				var change = event.type == "change";
+				ct.ui_search_text = event.target.value;
+				ct.ui_schedule_update(change ? null : 250);
+				if (change) event.target.blur();
 			}
 			
 			ct.ui_cb_locate = function() {
-				console.log("locate");
+				ct.ui_location_enable(null);
+				if (!navigator || !navigator.geolocation) alert("no location :(");
+				navigator.geolocation.getCurrentPosition(
+					ct.ui_location_enable, 
+					() => alert("location denied :(")
+				);
 			}
 			
 			ct.ui_cb_search = function() {
-				console.log("search");
+				ct.ui_location_enable(null);
+				ct.ui_schedule_update(null);
 			}
 			
 			ct.init_main = function() {
 				ct.cmp_stations = [];
 				ct.cmp_mappings = {};
 				ct.cmp_routes = [];
+				ct.cmp_names = {};
 				ct.proto_active_times = [];
+				
+				for (var i = 0; i < ct.data_stations.header.length; i++) {
+					ct.cmp_names[ct.data_stations.header[i].name.toLowerCase().trim()] = i;
+				}
 				
 				var test = document.querySelector("div.main-content");
 				for (var i = 0; i < ct.data_stations.stations.length; i++) {
 					var station = ct.init_parse_station(ct.data_stations.stations[i], ct.cmp_mappings, ct.cmp_routes, ct.cg_departure_columns);
 					ct.cmp_stations.push(station);
-					test.appendChild(station.entry);
+					//test.appendChild(station.entry);
 				}
 				
 				ct.ui_display_times();
+				ct.ui_update();
+				
+				var search = document.querySelector("div.station-search input");
+				
+				search.addEventListener("input", ct.ui_cb_input);
+				search.addEventListener("change", ct.ui_cb_input);
 				
 				document.querySelector("button.station-search-locate").addEventListener("click", ct.ui_cb_locate);
 				document.querySelector("button.station-search-search").addEventListener("click", ct.ui_cb_search);
@@ -533,10 +623,13 @@
 			  --departures-ratio: 30%;
 			}
 
-			html {
-				height: 100%;
-			}
-
+			html { height: 100%; }
+			input { font-family: Roboto, Arial, Helvetica, sans-serif; }
+			button { font-family: Roboto, Arial, Helvetica, sans-serif; }
+			
+			.style-hidden { display: none !important; }
+			.style-invert { filter: invert(1) !important; }
+			.style-grayed { filter: contrast(0.5) !important; }
 
 			body {
 				display: flex;
@@ -550,14 +643,6 @@
 				height: 100%;
 				position: relative;
 				overflow: hidden;
-			}
-
-			input {
-				font-family: Roboto, Arial, Helvetica, sans-serif;
-			}
-
-			button {
-				font-family: Roboto, Arial, Helvetica, sans-serif;
 			}
 
 			.content-row {
@@ -716,6 +801,7 @@
 				margin-right: auto;
 				font-family: monospace;
 				float: left;
+				text-align: left;
 			}
 
 			.station-table > table {
@@ -727,21 +813,8 @@
 				white-space: normal;
 			}
 
-			/**/
-
-			@keyframes loading-animation {
-				from {filter: brightness(0.75);}
-				to {filter: brightness(0.95);}
-			}
-
 			.departure-loading .station-table table {
-				/*animation: loading-animation 0.75s ease-in-out infinite;
-				animation-direction: alternate;*/
 				filter: saturate(0.85) contrast(0.5)
-			}
-			
-			tr.departure-none {
-				filter: contrast(0.5);
 			}
 
 			.station-table td {
@@ -764,17 +837,13 @@
 				padding: 15px 10px;
 				text-align: center;
 			}
-
-			.hidden {
-				display: none;
-			}
 		</style>
 	</head>
 	<body>
 		<div class="site-nav content-row">
 			<a class="nav-title" href>CTrain Departures</a>
 			<div class="station-search">
-				<input type="search" placeholder="Station name..." spellcheck=false></input>
+				<input type="search" placeholder="Station name..." spellcheck=false autocorrect="off"></input>
 				<div class="station-search-buttons">
 					<button class="station-search-locate" title="Location" type="button"></button>
 					<button class="station-search-search" title="Search" type="button"></button>
@@ -782,6 +851,6 @@
 			</div>
 		</div>
 		<div class="main-content content-row content-body"></div>
-		<div class="message-area content-row content-body hidden"> a</div>
+		<div class="message-area content-row content-body style-hidden"></div>
 	</body>
 </html>
