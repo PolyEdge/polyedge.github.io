@@ -495,10 +495,13 @@
 			}
 			
 			ct.ui_perform_search = function(query) {
+				var dist = function(lat1, long1, lat2, long2) {
+					return Math.acos(Math.sin(lat1) * Math.sin(lat2) + Math.cos(lat1) * Math.cos(lat2) * Math.cos(long1 - long2));
+				}
 				var comparator = function(a, b) {
 					var loc = ct.ui_user_location.coords;
-					var dist1 = (loc.latitude - a.pos_latitude) ** 2 + (loc.longitude - a.pos_longitude) ** 2;
-					var dist2 = (loc.latitude - b.pos_latitude) ** 2 + (loc.longitude - b.pos_longitude) ** 2;
+					var dist1 = dist(loc.latitude, loc.longitude, a.pos_latitude, a.pos_longitude);
+					var dist2 = dist(loc.latitude, loc.longitude, b.pos_latitude, b.pos_longitude);
 					return dist1 == dist2 ? 0 : dist1 < dist2 ? -1 : 1;
 				}
 			
