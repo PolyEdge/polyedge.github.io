@@ -9,6 +9,7 @@
 			var ct = {
 				cg_update_interval: 30,
 				cg_overhead_time: 55,
+				cg_prediction_interval: 1800,
 				cg_departure_columns: 3,
 				cg_cell_ratios: [0.45, 0.1],
 				
@@ -20,7 +21,6 @@
 				proto_message: null,
 				proto_active_timer: null,
 				ui_user_location: null,
-				ui_current_route: null,
 				ui_search_text: null,
 				ui_update_timer: null,
 				ui_station_array: null,
@@ -320,10 +320,8 @@
 			ct.init_parse_station = function(station_data, update_map, route_map, column_count) {
 				var resize_array = function(array, size) { while(array.length < size) array.push(null); }
 				var real_stops = station_data.stops.map((x, i) => [i, x]).filter((x) => x[1] != null).map((x) => [x[0], x[1][0], x[1][1]]);
-				var route_ids = real_stops.map((x) => ct.data_stations.header[x[0]].id);
-				var stop_ids = real_stops.map((x) => x[1]);
-				route_ids = route_ids.filter((x, i, s) => s.indexOf(x) == i);
-				stop_ids = stop_ids.filter((x, i, s) => s.indexOf(x) == i);
+				var route_ids = real_stops.map((x) => ct.data_stations.header[x[0]].id).filter((x, i, s) => s.indexOf(x) == i);
+				var stop_ids = real_stops.map((x) => x[1]).filter((x, i, s) => s.indexOf(x) == i);
 				
 				var station_id = document.createElement("b");
 				station_id.appendChild(document.createTextNode(stop_ids.join(" ")));
@@ -354,10 +352,12 @@
 					var route = ct.data_stations.header[ordinal];
 					var row = table.insertRow();
 					var cells = ct.tbl_gen_row(row, column_count, route.name.toUpperCase(), route.colour);
-					var row = {times: [], row: row, cells: cells}
-					rows.push(row);
+					var data = {ordinal: ordinal, index: stop[2], times: [], last_timestep: null, row: row, cells: cells}
+					
+					resize_array(rows, ordinal + 1);
+					rows[ordinal] = data;
 					if (!(route.id in update_map)) update_map[route.id] = {};
-					update_map[route.id][stop[1]] = row;
+					update_map[route.id][stop[1]] = data;
 					resize_array(route_map, ordinal + 1);
 					if (route_map[ordinal] == null) route_map[ordinal] = [];
 					var route_stops = route_map[ordinal];
@@ -417,19 +417,25 @@
 				for (var route_id in ct.cmp_mappings) {
 					var route = ct.cmp_mappings[route_id];
 					for (var stop_id in route) {
-						route[stop_id].times.length = 0;
+						route[stop_id].times = {};
 					}
 				}
 			}
 			
 			ct.proto_compile_times = function(feed_message) {
 				dbg_feedmessage = feed_message;
+				var get_handle = function(mapping, trip_id, offset) {
+					var station = ct.cmp_routes[mapping.ordinal][mapping.index + offset];
+					var handle = station != null ? station.handles[mapping.ordinal].times : null;
+					return handle == null ? null : handle.hasOwnProperty(trip_id) ? handle[trip_id] : null;
+				}
 				var length = feed_message.entity.length;
 				if (length == 0) throw new ct.ex_missing_data("No CTrain updates: no messages");
 				ct.proto_clear_times();
 				var has = false;
 				for (var i = 0; i < length; i++) {
 					var item = feed_message.entity[i];
+					var trip_id = item.tripUpdate.trip.tripId;
 					var route_id = item.tripUpdate.trip.routeId;
 					if (!ct.cmp_mappings.hasOwnProperty(route_id)) continue;
 					var route_mappings = ct.cmp_mappings[route_id];
@@ -439,26 +445,64 @@
 						if (update.departure == null) continue;
 						var stop_id = update.stopId;
 						if (!route_mappings.hasOwnProperty(stop_id)) continue;
+						var departure = update.departure.time;
+						if (departure <= 0) continue;
+						var data = {departure: departure, timestep: null, predicted: false};
+						var mapping = route_mappings[stop_id];
+						var previous = get_handle(mapping, trip_id, -1);
+						var next = get_handle(mapping, trip_id, 1);
+						if (previous != null) data.timestep = departure - previous.departure;
+						if (next != null) next.timestep = next.departure - departure;
 						has = true;
-						route_mappings[stop_id].times.push(update.departure.time);
+						route_mappings[stop_id].times[trip_id] = data;
+					}
+				}
+				for (var i = 0; i < ct.cmp_routes.length; i++) {
+					var stops = ct.cmp_routes[i];
+					for (var j = 0; j < stops.length; j++) {
+						var previous = stops[j - 1];
+						var current = stops[j];
+						if (previous == null || current == null) continue;
+						var handle = current.handles[i];
+						var times = handle.times;
+						var timesteps = Object.values(times).filter(x => x.timestep != null).map(x => x.timestep);
+						var timestep = timesteps.length > 0 ? Math.max(...timesteps) : handle.last_timestep;
+						if (timestep == null) continue;
+						handle.last_timestep = timestep;
+						var prev_times = previous.handles[i].times;
+						var trips = Object.entries(prev_times);
+						for (var k = 0; k < trips.length; k++) {
+							var trip = trips[k];
+							var current_trip = times[trip[0]];
+							if (current_trip != null) continue;
+							var data = {departure: trip[1].departure + timestep, timestep: timestep, predicted: true};
+							times[trip[0]] = data;
+						}
 					}
 				}
 				if (!has) throw new ct.ex_missing_data("No CTrain updates: " + length + " messages");
 			}
 			
 			ct.ui_display_times = function() {
+				var comparator = function(a, b) {
+					return a.departure == b.departure ? 0 : a.departure < b.departure ? -1 : 1;
+				}
 				var now = Date.now() / 1000 - ct.cg_overhead_time;
 				for (var index in ct.cmp_stations) {
 					var handles = ct.cmp_stations[index].handles;
 					for (var handle_index in handles) {
 						var handle = handles[handle_index];
-						var valid = handle.times.filter(item => item != null && now < item);
+						if (handle == null) continue;
+						var valid = Object.values(handle.times).filter(item => item != null && now < item.departure);
 						if (valid.length > 0) handle.row.classList.remove("style-grayed");
 						else handle.row.classList.add("style-grayed");
-						valid.sort();
+						valid.sort(comparator);
 						for (var i = 0; i < handle.cells.length; i++) {
-							var time = valid[i];
+							var data = valid[i];
+							var time = data != null ? data.departure : null;
 							var element = handle.cells[i];
+							if (data != null && data.predicted) element.classList.add("style-purple");
+							else element.classList.remove("style-purple");
 							while (element.firstChild) element.removeChild(element.lastChild);
 							var text = time == null ? "-   " : Math.floor((time - now) / 60) + "m";
 							element.appendChild(document.createTextNode(text));
@@ -577,11 +621,9 @@
 					ct.cmp_names[ct.data_stations.header[i].name.toLowerCase().trim()] = i;
 				}
 				
-				var test = document.querySelector("div.main-content");
 				for (var i = 0; i < ct.data_stations.stations.length; i++) {
 					var station = ct.init_parse_station(ct.data_stations.stations[i], ct.cmp_mappings, ct.cmp_routes, ct.cg_departure_columns);
 					ct.cmp_stations.push(station);
-					//test.appendChild(station.entry);
 				}
 				
 				ct.ui_display_times();
@@ -633,6 +675,7 @@
 			.style-hidden { display: none !important; }
 			.style-invert { filter: invert(1) !important; }
 			.style-grayed { filter: contrast(0.5) !important; }
+			.style-purple { color: purple !important; }
 
 			body {
 				display: flex;
