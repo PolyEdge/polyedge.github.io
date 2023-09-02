@@ -1,3 +1,4 @@
 server.py
-demo/
+cert.pem
+key.pem
 static/resource

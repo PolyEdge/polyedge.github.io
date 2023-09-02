@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>COT</title>
+		<meta charset="UTF-8">
+		<meta meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+		<script src='https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js'></script>
+		<script> 
+			var cot = {
+				resize_timer: null,
+				resize_cooldown: 250,
+				
+				cam_default_device: null,
+				cam_media_devices: null,
+				cam_selected_index: 0,
+				
+				ocr_language: "eng",
+				ocr_workers: 3,
+				ocr_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$#/.,*-() ",
+				ocr_scheduler: Tesseract.createScheduler(),
+				
+				elem: {
+					video: "video",
+					canvas_cam: "canvas.image-layer",
+					canvas_hud: "canvas.crop-layer",
+					canvas_buffer: null,
+					ctx_cam: null,
+					ctx_hud: null,
+					ctx_buffer: null,
+					hud_main: ".hud",
+					hud_top: ".hud-top",
+					hud_middle: ".hud-middle",
+					btn_capture: "button.control-capture",
+					btn_swap: "button.control-swap",
+					btn_cancel: "button.control-cancel",
+				},
+				
+				phase: {
+					handlers: [],
+					redo_queue: [],
+					data_store: [],
+					index: 0,
+					captured: false,
+					multi: false,
+				},
+				
+				//crop_ignore_next: false,
+				crop_cfg: {
+					cross_size: 25,
+					grab_range: 16,
+					line_width: 6,
+					min_size: 100,
+					initial_ratio_x: 1.0,
+					initial_ratio_y: 0.9,
+				},
+				
+				crop_data: {
+					active: false,
+					transforming: false,
+					region_bbox: null,
+					edge_handles: null,
+					box_handle: null
+				},
+				
+				cb_event_map: {
+					mousedown: "press", 
+					mouseup: "release", 
+					mousemove: "move",
+					touchstart: "press", 
+					touchend: "release", 
+					touchcancel: "release", 
+					touchmove: "move"
+				}
+			};
+			
+			cot.init_system = function() {
+				cot.phase_add(cot.handle_01_xdept, "X DEPT", false);
+				cot.phase_add(cot.handle_02_xtrans, "X TRANS", false);
+				cot.phase_add(cot.handle_03_termdetails, "DEBIT", true);
+				cot.phase_add(cot.handle_04_paymentmgr, "PAYMENT", false);
+				
+				Object.entries(cot.elem).forEach((entry) => {
+					var value = entry[1];
+					if (typeof(value) === "string") { cot.elem[entry[0]] = document.querySelector(value); }
+				});
+			
+				cot.elem.canvas_buffer = document.createElement("canvas");
+				cot.elem.ctx_cam = cot.elem.canvas_cam.getContext("2d");
+				cot.elem.ctx_hud = cot.elem.canvas_hud.getContext("2d");
+				cot.elem.ctx_buffer = cot.elem.canvas_buffer.getContext("2d");
+				
+				cot.elem.hud_main.classList.add("loading");
+				cot.hud_write({middle: "Loading"});
+				
+				var video_promise = navigator.mediaDevices.getUserMedia({video: true})
+					.then(result => {
+						cot.cam_default_device = result;
+						return navigator.mediaDevices.enumerateDevices()
+					})
+					.then(devices => {
+						cot.cam_media_devices = devices.filter(device => device.kind === 'videoinput');
+						cot.cam_select(0);
+					})
+					.catch((error) => {
+						cot.hud_write({middle: "Camera Error"});
+						throw error;
+					});
+				
+				var ocr_promise = cot.init_ocr().catch((error) => {
+					cot.hud_write({middle: "OCR Error"});
+					throw error;
+				});
+				
+				Promise.all([video_promise, ocr_promise])
+					.then(cot.init_ready)
+					.catch(error => {
+						console.error(error);
+					});
+			}
+			
+			cot.init_ocr = async function() {
+				var generator = async () => {
+					var worker = await Tesseract.createWorker({langPath: "https://tessdata.projectnaptha.com/4.0.0_best"});
+					await worker.loadLanguage(cot.ocr_language);
+					await worker.initialize(cot.ocr_language);
+					await worker.setParameters({
+						tessedit_pageseg_mode: Tesseract.PSM.SINGLE_COLUMN,
+						tessedit_char_whitelist: cot.ocr_whitelist,
+						language_model_penalty_non_dict_word: 0,
+						language_model_penalty_non_freq_dict_word: 0,
+						user_defined_dpi: "1030"
+					});
+					cot.ocr_scheduler.addWorker(worker);
+				}
+				var initializer = async () => {
+					var workers = new Array(cot.ocr_workers);
+					for (var i = 0; i < workers.length; i++) {
+						workers[i] = generator();
+					}
+					await Promise.all(workers);	
+				}
+				await initializer();
+			}
+			
+			cot.init_ready = function() {
+				window.addEventListener("resize", cot.cb_resize);
+				window.addEventListener("mousedown", cot.cb_inputevent);
+				window.addEventListener("mouseup", cot.cb_inputevent);
+				window.addEventListener("mousemove", cot.cb_inputevent);
+				window.addEventListener("touchstart", cot.cb_inputevent, {passive: false});
+				window.addEventListener("touchend", cot.cb_inputevent, {passive: false});
+				window.addEventListener("touchcancel", cot.cb_inputevent, {passive: false});
+				window.addEventListener("touchmove", cot.cb_inputevent, {passive: false});
+				cot.elem.btn_capture.addEventListener("click", cot.cb_capture);
+				cot.elem.btn_swap.addEventListener("click", cot.cb_switch);
+				cot.elem.btn_cancel.addEventListener("click", cot.cb_cancel);
+				
+				cot.elem.hud_main.classList.remove("loading");
+				cot.phase_begin(false);
+			}
+			
+			cot.cam_select = function(delta) {
+				cot.cam_selected_index = (cot.cam_selected_index + delta) % cot.cam_media_devices.length;
+				var device = cot.cam_media_devices[cot.cam_media_devices.length - cot.cam_selected_index - 1];
+				cot.cam_init(device.deviceId, cot.cam_stream_init);
+			}
+			
+			cot.cam_init = function(media_id, callback) {
+				navigator.mediaDevices.getUserMedia({video: {
+					deviceId: {exact: media_id},  
+					width: { ideal: 99999 },
+					height: { ideal: 99999 }
+				}})
+					.then(callback)
+					.catch(error => { cot.cam_stream_init(cot.cam_default_device); })
+			}
+			
+			cot.cam_stream_init = function(stream) {
+				cot.elem.stream = stream;
+				cot.elem.video.srcObject = stream;
+			}
+			
+			cot.cam_capture = function() {
+				//cot.dbg_display_text()
+				var scale_x = cot.elem.video.clientWidth / cot.elem.video.videoWidth;
+				var scale_y = cot.elem.video.clientHeight / cot.elem.video.videoHeight;
+				var scale = Math.max(scale_x, scale_y);
+				cot.elem.canvas_cam.width = Math.round(cot.elem.video.videoWidth * scale_x / scale);
+				cot.elem.canvas_cam.height = Math.round(cot.elem.video.videoHeight * scale_y / scale);
+				var pos_x = Math.round((cot.elem.video.videoWidth - cot.elem.canvas_cam.width) / 2);
+				var pos_y = Math.round((cot.elem.video.videoHeight - cot.elem.canvas_cam.height) / 2);
+				//cot.elem.ctx_cam.imageSmoothingEnabled = false;
+				cot.elem.ctx_cam.drawImage(cot.elem.video, -pos_x, -pos_y);
+			}
+			
+			cot.hud_write = function(args) {
+				var clear = function(element) {
+					while (element.firstChild) { element.removeChild(element.lastChild); }
+				}
+				var write_label = function(element, text) {
+					clear(element);
+					if (text == null) { return; }
+					var new_text = document.createElement("p");
+					new_text.appendChild(document.createTextNode(text));
+					element.appendChild(new_text);
+				}
+				if ("top" in args) { write_label(cot.elem.hud_top, args["top"]); }
+				if ("middle" in args) { write_label(cot.elem.hud_middle, args["middle"]); }
+				if ("button" in args) {
+					clear(cot.elem.btn_capture);
+					if (args["button"] == null) { return; }
+					cot.elem.btn_capture.appendChild(document.createTextNode(args["button"])); 
+				}
+			}
+			
+			cot.hud_render = function() {
+				cot.elem.ctx_hud.clearRect(0, 0, cot.elem.canvas_hud.width, cot.elem.canvas_hud.height);
+				if (cot.crop_data.active) { cot.crop_render(); }
+			}
+			
+			cot.phase_add = function(handler, text, multi) {
+				cot.phase.handlers.push([handler, text, multi]);
+			}
+			
+			cot.phase_begin = function(next) {
+				if (next) {
+					var handle = cot.phase.data_store[cot.phase.index];
+					handle.done = true; 
+					handle.handler("end", handle);
+				}
+				while (cot.phase.index < cot.phase.data_store.length && cot.phase.data_store[cot.phase.index].done) {
+					cot.phase.index++;
+				}
+				if (cot.phase.redo_queue.length > 0) { cot.phase.index = cot.phase.redo_queue.shift(); }
+				var handler = cot.phase.handlers[cot.phase.index];
+				cot.hud_write({
+					top: handler[1], 
+					middle: null,
+					button: cot.phase.data_store.length == 0 ? null : cot.phase.data_store.length + 1
+				});
+				var data = {
+					handler: handler[0],
+					done: false,
+					images: []
+				};
+				cot.phase.data_store[cot.phase.index] = data;
+				cot.phase.multi = handler[2];
+				data.handler("begin", data);
+			}
+			
+			cot.phase_commands = function(args) {
+				if (args["save"] === true && cot.phase.captured) {
+					const phase_data = cot.phase.data_store[cot.phase.index];
+					const capture = cot.crop_capture(cot.crop_data.region_bbox);
+					const capture_data = {
+						bbox: cot.crop_data.region_bbox.slice(),
+						image: capture,
+						scanned: false,
+						ocr_result: null
+					};
+					phase_data.images.push(capture_data);
+					phase_data.handler("image_add", capture_data);
+					cot.ocr_scheduler.addJob("recognize", capture.data, {rotateAuto: true}).then((result) => {
+						capture_data.ocr_result = result;
+						capture_data.scanned = true;
+						phase_data.handler("image_scan", capture_data);
+					});
+					cot.dbg_display_img(capture.data);
+				} 
+				if (args["next"] === true) { cot.phase_begin(true); }
+				if ("captured" in args) {
+					var captured = args["captured"];
+					if (captured && !cot.phase.captured) { cot.cam_capture(); }
+					cot.phase.captured = captured;
+					if (!captured && cot.crop_data.active) { cot.crop_enable(false); }
+					if (captured || cot.phase.multi) { cot.elem.btn_cancel.classList.remove("hidden"); }
+					else { cot.elem.btn_cancel.classList.add("hidden"); }
+					if (captured) { cot.crop_enable(true); } 
+					else { cot.elem.ctx_cam.clearRect(0, 0, cot.elem.canvas_cam.width, cot.elem.canvas_cam.height); }
+				}
+				requestAnimationFrame(cot.hud_render);
+			}
+			
+			cot.crop_enable = function(enable) {
+				cot.crop_data.active = enable;
+				if (!enable) { return; }
+				var boxg = (outer, inner) => Math.round(outer / 2 + inner)
+				var width = cot.elem.canvas_hud.width = cot.elem.canvas_hud.clientWidth;
+				var height = cot.elem.canvas_hud.height = cot.elem.canvas_hud.clientHeight;
+				var bbox_width = cot.crop_cfg.initial_ratio_x * width / 2;
+				var bbox_height = cot.crop_cfg.initial_ratio_y * height / 2;
+				cot.crop_data = {
+					active: true,
+					transforming: false,
+					edge_handles: [null, null, null, null],
+					box_handle: null
+				};
+				cot.crop_data.region_bbox = [boxg(width, -bbox_width), boxg(height, -bbox_height), 
+											 boxg(width, +bbox_width), boxg(height, +bbox_height)];
+			}
+			
+			cot.crop_render = function() {
+				var center = (c1, c2) => Math.round(c1 + (c2 - c1) / 2);
+				var canvas = cot.elem.canvas_hud;
+				var bbox = cot.crop_data.region_bbox;
+				
+				draw_selected = function(px, py, index) {
+					if (cot.crop_data.edge_handles[index] == null) { cot.elem.ctx_hud.moveTo(px, py) }
+					else { cot.elem.ctx_hud.lineTo(px, py); cot.elem.ctx_hud.stroke(); }
+				}
+				cot.elem.ctx_hud.lineWidth = cot.crop_cfg.line_width;
+
+				cot.elem.ctx_hud.globalAlpha = 0.4;
+				cot.elem.ctx_hud.fillStyle = "black";
+				cot.elem.ctx_hud.fillRect(0, 0, canvas.width, bbox[1]);
+				cot.elem.ctx_hud.fillRect(0, bbox[1], bbox[0], canvas.height - bbox[1]);
+				cot.elem.ctx_hud.fillRect(bbox[2], bbox[1], canvas.width - bbox[2], canvas.height - bbox[1]);
+				cot.elem.ctx_hud.fillRect(bbox[0], bbox[3], bbox[2] - bbox[0], canvas.height - bbox[3]);
+				
+				cot.elem.ctx_hud.globalAlpha = 1;
+				cot.elem.ctx_hud.strokeStyle = "#505060";
+				cot.elem.ctx_hud.beginPath();
+				cot.elem.ctx_hud.rect(bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]);
+				cot.elem.ctx_hud.stroke();
+
+				if (cot.crop_data.transforming) {
+					var cx = center(bbox[0], bbox[2]), cy = center(bbox[1], bbox[3]);
+					cot.elem.ctx_hud.moveTo(cx - cot.crop_cfg.cross_size, cy);
+					cot.elem.ctx_hud.lineTo(cx + cot.crop_cfg.cross_size, cy);
+					cot.elem.ctx_hud.moveTo(cx, cy - cot.crop_cfg.cross_size);
+					cot.elem.ctx_hud.lineTo(cx, cy + cot.crop_cfg.cross_size);
+					cot.elem.ctx_hud.stroke();
+				}
+				cot.elem.ctx_hud.closePath();
+				
+				cot.elem.ctx_hud.strokeStyle = "white";
+				cot.elem.ctx_hud.lineWidth++;
+				cot.elem.ctx_hud.beginPath();
+				cot.elem.ctx_hud.moveTo(bbox[0], bbox[3]);
+				draw_selected(bbox[0], bbox[1], 0);
+				draw_selected(bbox[2], bbox[1], 1);
+				draw_selected(bbox[2], bbox[3], 2);
+				draw_selected(bbox[0], bbox[3], 3);
+				draw_selected(bbox[0], bbox[1], 0);
+				cot.elem.ctx_hud.closePath();
+			}
+			
+			cot.crop_collide = function(pos_x, pos_y, handle) {
+				var expand = cot.crop_cfg.grab_range;
+				var bbox = cot.crop_data.region_bbox;
+				var apply = function(px, py, start, end, pos_y, expand, handle, index) {
+					var hit = px >= start - expand && px <= end + expand && Math.abs(py - pos_y) <= expand;
+					cot.crop_data.edge_handles[index] = hit ? handle : null;
+					return hit;
+				}
+				handle = handle == null ? null : [pos_x, pos_y, handle];
+				var col_y = apply(pos_y, pos_x, bbox[1], bbox[3], bbox[0], expand, handle, 0);
+				var col_x = apply(pos_x, pos_y, bbox[0], bbox[2], bbox[1], expand, handle, 1);
+				col_y |= apply(pos_y, pos_x, bbox[1], bbox[3], bbox[2], expand, col_y ? null : handle, 2);
+				col_x |= apply(pos_x, pos_y, bbox[0], bbox[2], bbox[3], expand, col_x ? null : handle, 3);
+				var resizing = col_x || col_y;
+				var all = !resizing && pos_x > bbox[0] && pos_x < bbox[2] && pos_y > bbox[1] && pos_y < bbox[3];
+				cot.crop_data.box_handle = all ? handle : null;
+				cot.crop_data.transforming = (resizing || all) && handle != null;
+			}
+			
+			cot.crop_commands = function(command, event) {
+				if (!cot.crop_data.active) { return; }
+				var clamp = function(a, b, min, max, min_dist) {
+					if (b > max) { a += max - b; b = max; }
+					if (a < min) { b += min - a; a = min; }
+					a = Math.max(Math.min(a, max), min)
+					return [a, Math.max(Math.min(b, max), min, a + min_dist)]
+				}
+				var pos_x, pos_y, handle;
+				var bbox = cot.crop_data.region_bbox;
+				if (event instanceof MouseEvent || event instanceof Touch) {
+					var rect = event.target.getBoundingClientRect();
+					pos_x = event.pageX;//event.clientX - rect.left;
+					pos_y = event.pageY;//event.clientY - rect.top;
+				} else if (event instanceof TouchEvent) {
+					for (var i = 0; i < event.changedTouches.length; i++) {
+						cot.crop_commands(command, event.changedTouches[i]);
+					}
+					return;
+				}
+				var press = command == "press";
+				if (press || command == "release") {
+					cot.crop_collide(pos_x, pos_y, press ? event : null);
+				} else if (command == "move") {
+					var matches = (handle, target) => {
+						return handle != null && (!(handle[2] instanceof Touch) || (target instanceof Touch && handle[2].identifier == target.identifier))
+					}
+					var all = matches(cot.crop_data.box_handle, event);
+					var delta_x = all ? pos_x - cot.crop_data.box_handle[0] : null;
+					var delta_y = all ? pos_y - cot.crop_data.box_handle[1] : null;
+					if (all) { cot.crop_data.box_handle[0] = pos_x, cot.crop_data.box_handle[1] = pos_y; }
+					for (var i = 0; i < cot.crop_data.edge_handles.length; i++) {
+						var handle = cot.crop_data.edge_handles[i];
+						var value = all ? bbox[i] + (i & 1 ? delta_y : delta_x) : (i & 1 ? pos_y : pos_x);
+						if (matches(handle, event) || all) { bbox[i] = value; }
+					}
+				} else if (command == "update") {
+					cot.elem.canvas_hud.width = cot.elem.canvas_hud.clientWidth;
+					cot.elem.canvas_hud.height = cot.elem.canvas_hud.clientHeight;
+				}
+				else { return; }
+				[bbox[0], bbox[2]] = clamp(bbox[0], bbox[2], 0, cot.elem.canvas_hud.width, cot.crop_cfg.min_size);
+				[bbox[1], bbox[3]] = clamp(bbox[1], bbox[3], 0, cot.elem.canvas_hud.height, cot.crop_cfg.min_size);
+				requestAnimationFrame(cot.hud_render);
+			}
+			
+			cot.crop_capture = function(bbox) {
+				var scale_x = cot.elem.canvas_cam.width / cot.elem.canvas_hud.width;
+				var scale_y = cot.elem.canvas_cam.height / cot.elem.canvas_hud.height;
+				var sx = bbox[0] * scale_x;
+				var sy = bbox[1] * scale_y;
+				var buffer = cot.elem.ctx_cam.getImageData(sx, sy, bbox[2] * scale_x - sx, bbox[3] * scale_y - sy);
+				cot.elem.canvas_buffer.width = buffer.width;
+				cot.elem.canvas_buffer.height = buffer.height;
+				cot.crop_image_filter(buffer);
+				cot.elem.ctx_buffer.putImageData(buffer, 0, 0);
+				return {
+					width: buffer.width, 
+					height: buffer.height,
+					data: cot.elem.canvas_buffer.toDataURL("image/png")
+				}
+			}
+			
+			cot.crop_image_filter = function(image) { // HOW DOES THIS EVEN WORK PROPERLY LOL
+				var result = new ArrayBuffer(image.data.length);
+				var distance = 0.05;
+				var average = (image.width + image.height) / 2
+				var block_width = Math.round(average * distance);
+				var block_height = block_width;
+				
+				var buffer_pull = new Array(image.width);
+				
+				const end_x = Math.min(block_width + 1, image.width);
+				const end_y = Math.min(block_height + 1, image.height);
+				const step = image.width << 2;
+				
+				var row_sample = 0;
+				var row_count = end_x * end_y;
+				var vertical_count = end_y;
+				var index, value;
+				
+				//console.log("w " + block_height);
+				
+				for (var x = 0; x < image.width; x++) {
+					index = x << 2;
+					value = 0;
+					for (var y = 0; y < end_y; y++) {
+						value += image.data[index] + image.data[index + 1] + image.data[index + 2];
+						index += step;
+					}
+					buffer_pull[x] = value;
+					if (x < end_x) { row_sample += value; }
+				}
+				
+				for (var y = 0; y < image.height; y++) {
+					index = step * y;
+					
+					var sample = row_sample;
+					var count = row_count;
+					var index1, index2;
+
+					
+					for (var x = 0; x < image.width; x++) {
+						index1 = index + (x << 2);
+						
+						value = image.data[index1] + image.data[index1 + 1] + image.data[index1 + 2];
+						
+						var opt = Math.min(value / (sample / count) * 255, 255);
+						result[index1] = opt;
+						result[index1 + 1] = opt;
+						result[index1 + 2] = opt;
+						result[index1 + 3] = 255;
+						
+						// stuff
+						
+						const x_istart = x - block_width;
+						const x_iend = x + block_width + 1;
+						const x_pop = x_istart >= 0;
+						const x_push = x_iend < image.width;
+						
+						sample += x_push ? buffer_pull[x_iend] : 0;
+						sample -= x_pop ? buffer_pull[x_istart] : 0;
+						
+						count -= x_pop * vertical_count;
+						count += x_push * vertical_count; 
+					}
+					
+					var y_istart = y - block_height;
+					var y_iend = y + block_height + 1;
+					const y_pop = y_istart >= 0;
+					const y_push = y_iend < image.height;
+					vertical_count = Math.min(y_iend, image.height) - Math.max(0, y_istart);
+					y_istart *= step;
+					y_iend *= step;
+					
+					for (var x = 0; x < image.width; x++) {
+						index = x << 2;
+						index1 = y_istart + index;
+						index2 = y_iend + index;
+						value = y_push ? image.data[index2] + image.data[index2 + 1] + image.data[index2 + 2] : 0;
+						value -= y_pop ? image.data[index1] + image.data[index1 + 1] + image.data[index1 + 2] : 0;
+						buffer_pull[x] = buffer_pull[x] + value;
+						if (x < end_x) { row_sample += value; }
+					}
+					
+					row_count -= y_pop * end_x;
+					row_count += y_push * end_x; 
+				}
+				
+				for (var i = 0; i < image.data.length; i++) {
+					image.data[i] = result[i];
+				}
+			}
+			
+			cot.crop_input = function(type, event, prevent, predicate) {
+				if (type == null || !cot.crop_data.active) { return; }
+				var down = type == "press";
+				var up = type == "release";
+				//if (event instanceof TouchEvent && up) { cot.crop_ignore_next = true; }
+				//if (event instanceof MouseEvent && press && cot.crop_ignore_next) { press = false; }
+				//cot.crop_ignore_next = false;
+				if ((down || type == "release") && (predicate != null && !predicate(event))) { return; }
+				else if (type == "move" && !cot.crop_data.transforming) { return; }
+				cot.crop_commands(type, event);
+				if (down) { cot.crop_commands("move", event) };
+				if (prevent && cot.crop_data.transforming) { event.preventDefault(); }
+			}
+			
+			cot.cb_inputevent = function(event) {
+				if (!cot.crop_data.active) { return; }
+				
+				cot.crop_input(
+					cot.cb_event_map[event.type], event, event.type != "touchstart", 
+					event instanceof MouseEvent ? (event) => event.button === 0 : null
+				)
+			}
+			
+			cot.cb_capture = function(event) {
+				cot.phase_commands({
+					captured: !cot.phase.captured, 
+					save: true, 
+					next: cot.phase.captured && !cot.phase.multi
+				});
+			}
+			
+			cot.cb_switch = function(event) {
+				if (!cot.phase.captured) { cot.cam_select(1); return; }
+				cot.phase_commands({
+					captured: true,
+					save: true,
+					next: !cot.phase.multi
+				});
+			}
+			
+			cot.cb_cancel = function(event) {
+				cot.phase_commands({
+					captured: false, 
+					save: false, 
+					next: !cot.phase.captured
+				});
+			}
+			
+			cot.cb_resize = function(event) {
+				if (event == null) {
+					cot.resize_timer = null;
+					cot.crop_commands("update", null);
+					return;
+				} else if (cot.resize_timer != null) { 
+					clearTimeout(cot.resize_timer);
+				}
+				cot.resize_timer = setTimeout(cot.cb_resize, cot.resize_cooldown);
+			}
+			
+			cot.handle_01_xdept = function(command, handle) {
+				console.log(command);
+				console.log(handle);
+				if (command == "image_scan") {
+					cot.dbg_display_text(handle.ocr_result.data.text);
+					cot.dbg_display_text(handle.image.width + "x" + handle.image.height);
+				}
+			}
+			
+			cot.handle_02_xtrans = function(command, handle) {
+				if (command == "image_scan") {
+					cot.dbg_display_text(handle.ocr_result.data.text);
+					cot.dbg_display_text(handle.image.width + "x" + handle.image.height);
+				}
+			}
+			
+			cot.handle_03_termdetails = function(command, handle) {
+				if (command == "image_scan") {
+					cot.dbg_display_text(handle.ocr_result.data.text);
+					cot.dbg_display_text(handle.image.width + "x" + handle.image.height);
+				}
+			}
+			
+			cot.handle_04_paymentmgr = function(command, handle) {
+			
+			}
+			
+			// crop capture test command
+			cot.dbg_display_img = function(image_data) {
+				var img = document.createElement("img");
+				img.src = image_data; 
+				img.style.position = "fixed"; 
+				img.style.top = "0";
+				img.style.zIndex = 10000; 
+				img.style.border = "5px solid black"; 
+				img.style.width = "100%";
+				img.style.height = "100%";
+				img.onclick = function() { document.body.removeChild(img); }
+				document.body.appendChild(img);	
+			}
+			
+			cot.dbg_display_text = function(text) {
+				var para = document.createElement("p");
+				para.style.position = "fixed"; 
+				para.style.top = "0";
+				para.style.zIndex = 10000; 
+				para.style.backgroundColor = "#ffffff";
+				para.style.border = "5px solid black"; 
+				var lines = text.split("\n");
+				for (var i = 0; i < lines.length; i++) {
+					para.appendChild(document.createTextNode(lines[i]));
+					para.appendChild(document.createElement("br"));
+				}
+				para.onclick = function() { document.body.removeChild(para); }
+				document.body.appendChild(para);	
+			}
+			
+			window.addEventListener("DOMContentLoaded", (event) => {
+				cot.init_system();
+			});
+			
+		</script>
+		<style>
+			@import url('https://fonts.googleapis.com/css?family=Raleway|Roboto+Slab|Roboto:400,500');
+			
+			html { height: 100%; overscroll-behavior-x: none; }
+			
+			body {
+				overscroll-behavior-x: none;
+				margin: 0;
+				position: relative;
+				overflow: hidden;
+				width: 100%;
+				height: 100%;
+			}
+			
+			video {
+				position: fixed;
+				object-fit: cover;
+				top: 0;
+				left: 0;
+				width: 100%;
+				height: 100%;
+			}
+			
+			canvas {
+				position: fixed;
+				top: 0;
+				left: 0;
+				width: 100%;
+				height: 100%;
+			}
+			
+			.hidden {
+				display: none;
+			}
+			
+			.hud {
+				width: 100%;
+				height: 100%;
+				display: grid;
+				align-content: space-between;
+				justify-content: center;
+				position: relative;
+				box-sizing: border-box;
+				padding: 20px;
+				color: white;
+				text-shadow: 2px 2px 2px black;
+			}
+			
+			.hud.loading { background-color: rgba(0, 0, 0, 50%); }
+			
+			.loading > .capture-row { filter: brightness(0.5); }
+			
+			.hud-text > p {
+				font-family: Roboto, Arial, Helvetica, sans-serif;
+				text-align: center;
+				font-size: 45px;
+				margin: 0 auto;
+				padding: 5px 10px;
+				background: rgba(0, 0, 0, 50%);
+				border-radius: 15px;
+			}
+			
+			.capture-row {
+				display: grid;
+				grid-template-columns: 1fr auto 1fr;
+				grid-column-gap: 20px;
+			    align-items: center;
+			}
+			
+			.capture-row > button, .capture-row > div > button {
+				padding: 0;
+				background: none;
+				box-shadow: inset 0px 0px 3px 3px black;
+				box-sizing: border-box;
+				text-align: center;
+				line-height: 200%;
+				color: white;
+				text-shadow: 2px 2px 2px black;
+			}
+			
+			.button-large {
+				width: 100px;
+				height: 100px;
+				border-radius: 50px;
+				font-size: 35px;
+				border: 10px solid white;
+			}
+			
+			.button-small {
+				width: 50px;
+				height: 50px;
+				border-radius: 25px;
+				font-size: 20px;
+				border: 5px solid white;
+			}
+			
+			.control-cancel {
+				color: red !important;
+			}
+			
+			/* ◄ 🔁 🔄 */
+			
+		</style>
+	</head>
+	<body>
+		<video autoplay muted playsInLine></video>
+		<canvas class="image-layer"></canvas>
+		<canvas class="crop-layer"></canvas>
+		<div class="hud">
+			<div class="hud-text hud-top"></div>
+			<div class="hud-text hud-middle"></div>
+			<div class="capture-row">
+				<div><button class="button-small control-cancel hidden">X</button></div>
+				<button class="button-large control-capture"></button>
+				<button class="button-small control-swap">🔄</button>
+			</div>
+		</div>
+	</body>
+</html>
